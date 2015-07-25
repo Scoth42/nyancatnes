@@ -1,0 +1,406 @@
+  .inesprg 2   ; 1x 16KB PRG code
+  .ineschr 1   ; 1x  8KB CHR data
+  .inesmap 0   ; mapper 0 = NROM, no bank swapping
+  .inesmir 1   ; background mirroring
+  
+
+;;;;;;;;;;;;;;;
+
+;; DECLARE SOME VARIABLES HERE
+  .rsset $0000  ;;start variables at ram location 0
+  
+gamestate  .rs 1  ; .rs 1 means reserve one byte of space
+buttons1   .rs 1  ; player 1 gamepad buttons, one bit per button
+buttons2   .rs 1  ; player 2 gamepad buttons, one bit per button
+nmicounter .rs 1  ; constant NMI counter for rng seeding purposes
+titledrawn .rs 1  ; Has the title screen been drawn yet?
+multtemp   .rs 1  ; Temp storage for multiplication
+
+
+;; DECLARE SOME CONSTANTS HERE
+STATETITLE     = $00  ; displaying title screen
+STATEPLAYING   = $01  ; move paddles/ball, check for collisions
+STATEGAMEOVER  = $02  ; displaying game over screen
+MOVEDELAY  = $1A  ; NMI between moves
+
+; Button codes and combinations
+BUTRIGHT  =$1 
+BUTLEFT   =$2 
+BUTDOWN   =$4
+BUTUP     =$8
+BUTSTART  =$10
+BUTSELECT =$20
+BUTB      =$40
+BUTA      =$80
+
+;;;;;;;;;;;;;;;;;;
+
+
+
+; start with bank 0
+  .bank 0
+  
+  ; indirect addressing must be in the zero page
+  .org $0080
+addrLO:	.db 0  ; make "variable"s for our indirect addressing
+addrHI: .db 0
+
+; Our real bank 0 starts here
+  .org $8000 
+RESET:
+  SEI          ; disable IRQs
+  CLD          ; disable decimal mode
+  LDX #$40
+  STX $4017    ; disable APU frame IRQ
+  LDX #$FF
+  TXS          ; Set up stack
+  INX          ; now X = 0
+  STX $2000    ; disable NMI
+  STX $2001    ; disable rendering
+  STX $4010    ; disable DMC IRQs
+
+vblankwait1:       ; First wait for vblank to make sure PPU is ready
+  BIT $2002
+  BPL vblankwait1
+
+clrmem:
+  TXA
+  AND #$F0
+  CMP #$20 
+  BEQ clrmem2 ; skip 0020s (rng)
+  LDA #$00
+  STA $0000, x
+clrmem2:
+  LDA #$00
+  STA $0100, x
+  STA $0300, x
+  STA $0400, x
+  STA $0500, x
+  STA $0600, x
+  STA $0700, x
+  LDA #$FE
+  STA $0200, x
+  INX
+  BNE clrmem
+   
+vblankwait2:      ; Second wait for vblank, PPU is ready after this
+  BIT $2002
+  BPL vblankwait2
+
+
+LoadPalettes:
+  LDA $2002             ; read PPU status to reset the high/low latch
+  LDA #$3F
+  STA $2006             ; write the high byte of $3F00 address
+  LDA #$00
+  STA $2006             ; write the low byte of $3F00 address
+  LDX #$00              ; start out at 0
+LoadPalettesLoop:
+  LDA palette, x        ; load data from address (palette + the value in x)
+                          ; 1st time through loop it will load palette+0
+                          ; 2nd time through loop it will load palette+1
+                          ; 3rd time through loop it will load palette+2
+                          ; etc
+  STA $2007             ; write to PPU
+  INX                   ; X = X + 1
+  CPX #$20              ; Compare X to hex $10, decimal 16 - copying 16 bytes = 4 sprites
+  BNE LoadPalettesLoop  ; Branch to LoadPalettesLoop if compare was Not Equal to zero
+                        ; if compare was equal to 32, keep going down
+  
+
+;;:Set starting game state. We want to start at title
+  LDA #STATETITLE
+  STA gamestate
+
+  
+
+  ;JSR turn_screen_on
+  LDA #%10010000   ; enable NMI, sprites from Pattern Table 0, background from Pattern Table 1
+  STA $2000
+
+  LDA #%00011110   ; enable sprites, enable background, no clipping on left side
+  STA $2001
+  
+Forever:
+  JMP Forever     ;jump back to Forever, infinite loop, waiting for NMI
+  
+ 
+
+NMI:
+
+  LDA #$00
+  STA $2003       ; set the low byte (00) of the RAM address
+  LDA #$02
+  STA $4014       ; set the high byte (02) of the RAM address, start the transfer
+   
+  ;;;all graphics updates done by here, run game engine
+
+
+
+  JSR ReadController1  ;;get the current button data for player 1
+  JSR ReadController2  ;;get the current button data for player 2
+  
+  INC nmicounter
+  
+GameEngine:  
+  LDA gamestate
+  CMP #STATETITLE
+  BEQ EngineTitle    ;;game is displaying title screen
+    
+  LDA gamestate
+  CMP #STATEGAMEOVER
+  BNE dj1
+  JMP EngineGameOver  ;;game is displaying ending screen
+
+dj1:
+  LDA gamestate
+  CMP #STATEPLAYING
+  BNE dj2
+  LDA #$DE
+  STA $0500
+  JMP EnginePlaying   ;;game is playing
+dj2:
+  
+GameEngineDone:  
+  
+  JSR UpdateSprites  ;;set ball/paddle sprites from positions
+  RTI
+  
+;;;;;;;;
+ 
+EngineTitle:
+  
+  LDA titledrawn ; Check to see if the title is done displaying. If not, keep going, otherwise skip the drawing.
+  BNE DoneDisp
+  LDA $2002    ; read PPU status to reset the high/low latch to high
+  LDA #$3F
+  STA $2006    ; write the high byte of $3F10 address
+  LDA #$1D
+  STA $2006    ; write the low byte of $3F10 address
+  LDA #$2D
+  STA $2007
+  LDA #$00
+  ;STA $2005
+  ;STA $2005
+  
+  JSR turn_screen_off
+  ;LDX #$40
+  ;STX $4017    ; disable APU frame IRQ
+  ;LDX #$FF
+  ;TXS          ; Set up stack
+  ;INX          ; now X = 0
+
+  ;STX $2000    ; disable NMI
+  ;STX $2001    ; disable rendering
+  ;STX $4010    ; disable DMC IRQs
+  
+    ldx #0
+	lda #$20  ; set the destination address in PPU memory
+  	sta $2006  ; should be $2000
+  	stx $2006
+  	lda #low(title)   ; put the high and low bytes of the address "title"
+  	sta addrLO        ; into the variables so we can use indirect addressing.
+  	lda #high(title)
+  	sta addrHI
+
+	ldx #4  ; number of 256-byte chunks to load
+  	ldy #0
+bgloop:
+  	lda [addrLO],y
+  	sta $2007     ; load 256 bytes
+  	iny
+  	bne bgloop
+;--------------------
+  	inc addrHI  ; increment high byte of address title to next 256 byte chunk
+  	dex        ; one chunk done so X = X - 1.
+  	bne bgloop   ; if X isn't zero, do again
+
+	jsr turn_screen_on
+    lda #$01
+	sta titledrawn
+	
+DoneDisp:
+  LDA #$00        ;;tell the ppu there is no background scrolling
+  STA $2005
+  STA $2005
+
+  ; We're done displaying the title. Start polling for the buttons to increase/decrease nkis and start to start
+  LDA #STATEPLAYING
+  STA gamestate
+
+  JSR SpriteSetup
+  
+  JMP GameEngineDone
+
+;;;;;;;;; 
+ 
+;;; GAMEOVERNMI HERE
+
+EngineGameOver:
+  
+SkipHere:
+  JMP GameEngineDone
+ 
+;;;;;;;;;;;
+ 
+EnginePlaying:
+  ; mark current position
+  JMP EnginePlaying
+GameOver:
+  ; Blank out line for displaying win animation
+  
+  LDA #STATEGAMEOVER
+  STA gamestate
+GameOverLock
+  JMP GameOverLock ; forever FIXME
+ 
+UpdateSprites:
+; Updating robot sprite
+  
+  
+  ;;update paddle sprites
+  RTS
+ 
+ 
+ReadController1:
+  LDA #$01
+  STA $4016
+  LDA #$00
+  STA $4016
+  LDX #$08
+ReadController1Loop:
+  LDA $4016
+  LSR A            ; bit0 -> Carry
+  ROL buttons1     ; bit0 <- Carry
+  DEX
+  BNE ReadController1Loop
+  RTS
+  
+ReadController2:
+  LDA #$01
+  STA $4016
+  LDA #$00
+  STA $4016
+  LDX #$08
+ReadController2Loop:
+  LDA $4017
+  LSR A            ; bit0 -> Carry
+  ROL buttons2     ; bit0 <- Carry
+  DEX
+  BNE ReadController2Loop
+  RTS  
+  
+turn_screen_on:
+  ; Setup the PPU
+  ;LDA #%10010111   ; enable NMI, sprites from Pattern Table 0, background from Pattern Table 1
+  LDA #%10000000   ; enable NMI, sprites from Pattern Table 0, background from Pattern Table 1
+  STA $2000
+
+  LDA #%00011110   ; enable sprites, enable background, no clipping on left side
+  STA $2001
+  rts 
+
+turn_screen_off:
+  LDX #$00     ; now X = 0
+  STX $2000    ; disable NMI
+  STX $2001    ; disable rendering
+  STX $4010    ; disable DMC IRQs
+  rts  
+
+clear_screen:
+  BIT $2002
+  BNE clear_screen
+  LDA $2002    ; read PPU status to reset the high/low latch to high
+  LDA #$3F
+  STA $2006    ; write the high byte of $3F10 address
+  LDA #$1D
+  STA $2006    ; write the low byte of $3F10 address
+  LDA #$12
+  STA $2007
+
+	ldx #0
+	lda #$20  ; set the destination address in PPU memory
+  	sta $2006  ; should be $2000
+  	stx $2006
+	
+    jsr turn_screen_off
+	ldx #4  ; number of 256-byte chunks to load
+  	ldy #0
+  
+clrloop:
+	lda #$00
+  	sta $2007     ; load 256 bytes
+  	iny
+  	bne clrloop
+;--------------------
+  	dex        ; one chunk done so X = X - 1.
+  	bne clrloop   ; if X isn't zero, do again
+	; Reset the Attribute table for strings
+LoadAttribute:
+
+  LDA $2002             ; read PPU status to reset the high/low latch
+  LDA #$23
+  STA $2006             ; write the high byte of $23C0 address
+  LDA #$C0
+  STA $2006             ; write the low byte of $23C0 address
+  LDX #$00              ; start out at 0
+  LDA %01010101
+LoadAttributeLoop:
+
+  STA $2007             ; write to PPU
+  INX  					; X = X + 1
+  CPX #$40              ; Compare X to hex 64. Copying lots of bytes.
+  BNE LoadAttributeLoop
+  
+  jsr turn_screen_on
+  RTS
+;;;;;;;;;;;;;;  
+
+SpriteSetup:
+  jsr turn_screen_off
+  CLC  
+
+
+title: 
+  .incbin "rainbow.bin"
+  
+  .bank 1
+  .org $A000
+palette:
+  
+  .db $0c,$16,$28,$27,$0c,$29,$22,$13,$0c,$06,$16,$26,$0c,$09,$19,$29
+
+;  .db $0f,$2d,$10,$30,  $0f,$30,$21,$31,  $0f,$06,$16,$26,  $0f,$2d,$19,$29   ;; background palette
+  ;.db $0f, $0f, $0f, $0f,  $0f, $0f, $0f, $0f,  $0f, $0f, $0f, $0f,  $0f, $0f, $0f, $0f
+ ; .db $0f,$1a,$30,$37,  $0f,$16,$21,$31,  $0f,$27,$25,$35,  $0f,$13,$29,$39   ;;sprite palette
+  
+sprites:
+     ;vert tile attr horiz
+  .db $80, $B0, $00, $80   ;sprite 0
+  ;.db $80, $33, $00, $88   ;sprite 1
+  ;.db $88, $34, $00, $80   ;sprite 2
+  ;.db $88, $35, $00, $88   ;sprite 3
+
+;attribute:  
+  ;.db %00000000, %00000000, %0000000, %00000000, %00000000, %00000000, %00000000, %00000000
+  ;.db %00000000, %00000000, %0000000, %00000000, %00000000, %00000000, %00000000, %00000000
+
+  
+  .bank 2
+  .org $C000
+    
+  .bank 3
+  .org $E000
+  
+  .org $FFFA     ;first of the three vectors starts here
+  .dw NMI        ;when an NMI happens (once per frame if enabled) the 
+                   ;processor will jump to the label NMI:
+  .dw RESET      ;when the processor first turns on or is reset, it will jump
+                   ;to the label RESET:
+  .dw 0          ;external interrupt IRQ is not used in this tutorial
+;;;;;;;;;;;;;;  
+  
+  
+  .bank 4
+  .org $0000
+  .incbin "nyan.chr"   ;includes 8KB graphics file from SMB1
